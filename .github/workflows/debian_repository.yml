@@ -1,0 +1,93 @@
+name: Build and Deploy Package Repository
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  BUILD_PATH: "repository"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DISTRIBUTION: any
+      COMPONENT: main
+      ARCHITECTURE: amd64
+      RELEASE: 1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq gnupg aptly
+
+      - name: Create APT repository with reprepro
+        run: |
+          mkdir -p repo/conf
+          echo "Origin: GitHub" >repo/conf/distributions
+          echo "Label: GitHub UV" >>repo/conf/distributions
+          echo "Suite: stable" >>repo/conf/distributions
+          echo "Codename: ${DISTRIBUTION}" >>repo/conf/distributions
+          echo "Components: ${COMPONENT}" >>repo/conf/distributions
+          echo "Architectures: ${ARCHITECTURE}" >>repo/conf/distributions
+          echo "SignWith: $KEY_ID" >>repo/conf/distributions
+          reprepro -Vb repo includedeb ${DISTRIBUTION} "uv_${{ steps.get-version.outputs.version }}-${RELEASE}_${ARCHITECTURE}.deb"
+          cp index.html repo/
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: repository
+          path: ${BUILD_PATH}/
+
+  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: Sign
+    env:
+      GPG_KEY_ID: ${{ vars.GPG_KEY_ID }}
+      GPG_PUBLIC_KEY: ${{ vars.GPG_PUBLIC_KEY }}
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+    steps:          
+      - name: Import GPG key
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --import
+      - name: Download artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: repository
+          path: ${BUILD_PATH}/
+      - name: Sign Release.gpg
+        run: >
+          cat ${BUILD_PATH}/dists/stable/Release
+          | gpg --default-key example -abs
+          > ${BUILD_PATH}/dists/stable/Release.gpg
+      - name: Sign InRelease
+        run: >
+          cat ${BUILD_PATH}/dists/stable/Release
+          | gpg --default-key example -abs --clearsign
+          > ${BUILD_PATH}/dists/stable/InRelease
+      - name: Add GPG public key
+        run: |
+          echo "$GPG_PUBLIC_KEY" > ${BUILD_PATH}/pubkey.asc
+          echo "$GPG_PUBLIC_KEY" | gpg --dearmor > ${BUILD_PATH}/pubkey.gpg
+      - name: Upload artifact
+        id: deployment
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${BUILD_PATH}/
+
+  deploy:
+    needs: sign
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
